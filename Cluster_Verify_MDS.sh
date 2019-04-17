@@ -1,33 +1,33 @@
 #!/bin/bash
 # declare vars
-session="gw-sid.txt"
 configs=( "static-route" "dns" "ntp" "snmp" "syslog" )
 
-if [ -f "$session" ] ;
-then
-  echo "Removing old session file $session"
-  rm $session
-fi
-
-#login to the CMA and gather all Clusters
-mgmt_cli -r true login > $session 2>&1
+#login to the MDS and record SID
+echo "Logging in Read-Only to the MDS level to retreive CMA list"
+MDSSID=$(mgmt_cli -r true login read-only true --format json |jq -r '.sid')
 
 #login and get all CMAs on the MDS
-CMAS=`mgmt_cli show-domains --format json -s $session |jq '.objects[].name' |sed 's/\"//g'`
+CMAS=$(mgmt_cli show-domains limit 250 --session-id ${MDSSID} --format json |jq -r  '.objects[].name')
 CMA_Count=`echo "$CMAS" |wc -l `
 echo "Total CMA Count is $CMA_Count"
+
+echo "Logging out of Read-Only session to R80 MDS"
+mgmt_cli logout --session-id $MDSSID --format json | jq -r '.message'
 
 #Start Loop for each CMA
 while read -r cma; do
 echo ""
 echo "#######################################"
 echo "Logging into $cma"
-mgmt_cli -r true login domain "$cma" > $cma-$session 2>&1
+SID=$(mgmt_cli -r true login domain "$cma" --format json |jq -r '.sid')
 
 #Get Policy Packages
-CLUSTERS=`mgmt_cli show-gateways-and-servers details-level full --format json -s $cma-$session |jq '.objects[] | select(.type | contains("CpmiGatewayCluster")) |  {name: .name, members: ."cluster-member-names"  } '`
-CLUSTERNAMES=`echo $CLUSTERS | jq '.name' |sed 's/\"//g'`
-CLUSTERCOUNT=`echo "$CLUSTERNAMES" | wc -l`
+CLUSTERS=`mgmt_cli show-gateways-and-servers details-level full --format json --session-id $SID |jq '.objects[] | select(.type | contains("CpmiGatewayCluster")) |  {name: .name, members: ."cluster-member-names"  } '`
+CLUSTERNAMES=`echo $CLUSTERS | jq -r '.name' `
+CLUSTERCOUNT=`echo "$CLUSTERS" |jq -r '.name' | wc -l`
+#Check to see if any Clusters are present
+if [ $CLUSTERCOUNT -ne "0" ]; then
+
 echo "CMA Contains $CLUSTERCOUNT Cluster(s)"
 echo "-------------------------------------------"
 echo  $CLUSTERNAMES |tr ' ' '\n'
@@ -40,12 +40,13 @@ SR=""
 base64=()
  for command in "${configs[@]}"
    do
-MEMBERS=`echo $CLUSTERS | jq "select(.name | contains(\"$name\")) | .members[]" |sed 's/\"//g' `
+echo "Checking $command"
+MEMBERS=`echo $CLUSTERS | jq -r "select(.name | contains(\"$name\")) | .members[]" `
 while read -r member; do
-      output=`mgmt_cli run-script script-name configucheck script 'clish -c "show configuration '$command'"' targets "$member" --format json -s $cma-$session 2>\&1`
+      output=`mgmt_cli run-script script-name configucheck script 'clish -c "show configuration '$command'"' targets "$member" --format json --session-id $SID 2>\&1`
       if [ $? -eq 0 ]
         then
-          base64+=(`echo $output |jq '.tasks[]."task-details"[].responseMessage' |sed 's/\"//g'`)
+          base64+=(`echo $output |jq -r '.tasks[]."task-details"[].responseMessage'`)
         else
           echo "Error getting data from cluster $name member $member"
         fi
@@ -70,33 +71,11 @@ MEMBERS=""
 base64=()
 done
 done <<< "$CLUSTERNAMES"
-
+fi
 echo "Logging out of $cma"
-logoutcma=`mgmt_cli logout -s $cma-$session 2>&1`
+logoutcma=`mgmt_cli logout --session-id $SID`
 if [ $? -ne 0 ]; then
   echo "Error logging out of CMA $cma"
 fi
 
-if [ -f "$cma-$session" ] ;
-then
-  echo "Removing old session file $cma-$session"
-  rm $cma-$session
-fi
-
- done <<< "$CMAS"
-
-
-#logout of the session
-echo "Logging out of the MDS Session"
-logout=`mgmt_cli logout -s $session 2>&1`
-if [ $? -ne 0 ]; then
-  echo "Error logging out of MDS"
-fi
-
-
-if [ -f "$session" ] ;
-then
-  echo "Removing old session file $session"
-  rm $session
-fi
-
+done <<< "$CMAS"
